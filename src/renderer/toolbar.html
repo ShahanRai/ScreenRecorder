@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+    html, body {
+      background: transparent;
+      overflow: hidden;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .toolbar-wrapper {
+      background: rgba(240, 244, 255, 0.95); /* Elegant pastel blue tint */
+      backdrop-filter: blur(15px);
+      -webkit-backdrop-filter: blur(15px);
+      border-radius: 9999px;
+      border: 1px solid rgba(191, 219, 254, 0.5); /* Pastel border */
+      box-shadow: 0 8px 30px rgba(59, 130, 246, 0.15); /* Soft pastel shadow */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0px;
+      -webkit-app-region: drag;
+    }
+    .toolbar-container {
+      display: flex;
+      gap: 10px;
+      padding: 8px 16px;
+      -webkit-app-region: no-drag;
+      align-items: center;
+    }
+    button {
+      background: transparent;
+      border: none;
+      color: #64748b;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      font-size: 18px;
+    }
+    button:hover {
+      background: rgba(0, 0, 0, 0.05);
+      color: #334155;
+      transform: scale(1.05);
+    }
+    button:active {
+      transform: scale(0.95);
+    }
+    button.active {
+      background: #eff6ff;
+      color: #3b82f6;
+      box-shadow: inset 0 0 0 1px #bfdbfe;
+    }
+    .stop-btn {
+      color: #ef4444;
+      background: #fef2f2;
+    }
+    .stop-btn:hover {
+      background: #fee2e2;
+      color: #dc2626;
+      box-shadow: inset 0 0 0 1px #fecaca;
+    }
+    .divider {
+      width: 1px;
+      height: 24px;
+      background: rgba(0, 0, 0, 0.1);
+      margin: 0 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar-wrapper">
+    <div class="toolbar-container">
+      <button id="btn-none" class="active" title="Mouse Pointer">
+        <i class="fas fa-mouse-pointer"></i>
+      </button>
+      
+      <div id="drawing-group" style="display: flex; align-items: center;">
+        <button id="btn-box" title="Draw Box">
+          <i class="far fa-square"></i>
+        </button>
+        
+        <button id="btn-arrow" title="Draw Arrow">
+          <i class="fas fa-arrow-right"></i>
+        </button>
+      </div>
+      
+
+
+      <div class="divider"></div>
+
+      <div id="recording-timer" style="color: #64748b; font-weight: 500; font-size: 14px; width: 48px; text-align: center; font-variant-numeric: tabular-nums;">00:00</div>
+
+      <div class="divider"></div>
+
+      <button id="btn-pause" title="Pause Recording">
+        <i class="fas fa-pause"></i>
+      </button>
+
+      <button id="btn-stop" class="stop-btn" title="Stop Recording">
+        <i class="fas fa-stop"></i>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const btnNone = document.getElementById('btn-none');
+    const btnBox = document.getElementById('btn-box');
+    const btnArrow = document.getElementById('btn-arrow');
+    const btnPause = document.getElementById('btn-pause');
+    const btnStop = document.getElementById('btn-stop');
+    const timerEl = document.getElementById('recording-timer');
+    
+    let startTime = Date.now();
+    let elapsedPaused = 0;
+    let isPaused = false;
+    let timerInterval;
+
+    function startTimer() {
+        timerInterval = setInterval(() => {
+            if (!isPaused) {
+                const diff = Math.floor((Date.now() - startTime - elapsedPaused) / 1000);
+                const m = Math.floor(diff / 60).toString().padStart(2, '0');
+                const s = (diff % 60).toString().padStart(2, '0');
+                timerEl.innerText = `${m}:${s}`;
+            }
+        }, 1000);
+    }
+    startTimer();
+
+    const drawBtns = { none: btnNone, box: btnBox, arrow: btnArrow };
+
+    let mode = 'none';
+
+    function toggleMode(targetMode) {
+      if (mode === targetMode) {
+        mode = 'none';
+      } else {
+        mode = targetMode;
+      }
+      Object.values(drawBtns).forEach(b => b.classList.remove('active'));
+      if (drawBtns[mode]) drawBtns[mode].classList.add('active');
+      window.api.setDrawMode(mode);
+    }
+
+    btnNone.onclick = () => toggleMode('none');
+    btnBox.onclick = () => toggleMode('box');
+    btnArrow.onclick = () => toggleMode('arrow');
+
+    let pauseStartTime = 0;
+    btnPause.onclick = () => {
+        isPaused = !isPaused;
+        if (isPaused) {
+            btnPause.innerHTML = '<i class="fas fa-play"></i>';
+            btnPause.title = "Resume Recording";
+            pauseStartTime = Date.now();
+            window.api.pauseRecording();
+        } else {
+            btnPause.innerHTML = '<i class="fas fa-pause"></i>';
+            btnPause.title = "Pause Recording";
+            elapsedPaused += (Date.now() - pauseStartTime);
+            window.api.resumeRecording();
+        }
+    }
+
+    window.api.onRevertToMouse(() => {
+        btnNone.click();
+    });
+
+    const drawingGroup = document.getElementById('drawing-group');
+    window.api.onDrawingAvailable((avail, isApp) => {
+        drawingGroup.style.display = avail ? 'flex' : 'none';
+        btnNone.style.display = isApp ? 'none' : 'flex';
+        if (!avail && mode !== 'none') {
+            btnNone.click();
+        }
+    });
+
+    btnStop.onclick = () => {
+       window.api.stopRecordingFromToolbar();
+    }
+  </script>
+</body>
+</html>
