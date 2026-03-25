@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recording Toolbar</title>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -17,8 +19,8 @@
     }
     .toolbar-wrapper {
       background: rgba(240, 244, 255, 0.95); /* Elegant pastel blue tint */
-      backdrop-filter: blur(15px);
       -webkit-backdrop-filter: blur(15px);
+      backdrop-filter: blur(15px);
       border-radius: 9999px;
       border: 1px solid rgba(191, 219, 254, 0.5); /* Pastel border */
       box-shadow: 0 8px 30px rgba(59, 130, 246, 0.15); /* Soft pastel shadow */
@@ -77,6 +79,8 @@
       background: rgba(0, 0, 0, 0.1);
       margin: 0 4px;
     }
+    .drawing-group { display: flex; align-items: center; }
+    .recording-timer { color: #64748b; font-weight: 500; font-size: 14px; width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
@@ -86,7 +90,7 @@
         <i class="fas fa-mouse-pointer"></i>
       </button>
       
-      <div id="drawing-group" style="display: flex; align-items: center;">
+      <div id="drawing-group" class="drawing-group">
         <button id="btn-box" title="Draw Box">
           <i class="far fa-square"></i>
         </button>
@@ -100,7 +104,7 @@
 
       <div class="divider"></div>
 
-      <div id="recording-timer" style="color: #64748b; font-weight: 500; font-size: 14px; width: 48px; text-align: center; font-variant-numeric: tabular-nums;">00:00</div>
+      <div id="recording-timer" class="recording-timer">00:00</div>
 
       <div class="divider"></div>
 

@@ -263,8 +263,13 @@ async function selectSource(source) {
         }
     };
 
-    // Only apply resolution constraints if not set to 'native'
-    if (resolutionSelect.value !== 'native') {
+    // Optimized constraints for window vs screen
+    if (source.id.startsWith('window:') || resolutionSelect.value === 'native') {
+        // For windows, we strongly prefer native resolution to avoid stretching/blurriness
+        // We set ideal instead of mandatory to allow the stream to adapt if resized
+        constraints.video.mandatory.minWidth = 128; // fallback min
+        constraints.video.mandatory.minHeight = 128;
+    } else {
         const [width, height] = resolutionSelect.value.split('x').map(Number);
         constraints.video.mandatory.minWidth = width;
         constraints.video.mandatory.maxWidth = width;

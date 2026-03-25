@@ -32,6 +32,44 @@ let toolbarWindow;
 let overlayWindow;
 let isDrawingAvailable = true;
 
+/**
+ * Robust PowerShell runner with logging and error handling
+ */
+function runPowerShell(script, args = []) {
+  const fullCommand = script.replace(/\n/g, ' ').trim();
+  try {
+    const output = execFileSync('powershell', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      fullCommand
+    ], { 
+      encoding: 'utf8', 
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'] // Capture both stdout and stderr
+    });
+    return { success: true, output: output.trim() };
+  } catch (error) {
+    console.error(`PowerShell Error for script: ${fullCommand}`);
+    console.error(`Stderr: ${error.stderr}`);
+    console.error(`Message: ${error.message}`);
+    return { success: false, error: error.stderr || error.message };
+  }
+}
+
+/**
+ * Spawn-based PowerShell runner for long-running processes (polling)
+ */
+function spawnPowerShell(script) {
+  const fullCommand = script.replace(/\n/g, ' ').trim();
+  return require('child_process').spawn('powershell', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    fullCommand
+  ]);
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
@@ -168,32 +206,63 @@ ipcMain.on('stop-saving', () => {
   }
 });
 
-// Windows management
+/// Windows management
 ipcMain.on('recording-started', (event, source) => {
-  mainWindow.minimize(); // Keep in taskbar but off-screen
+  mainWindow.minimize();
 
-  let targetDisplay = screen.getDisplayMatching(mainWindow.getBounds()); // Fallback to current UI screen
+  let targetDisplay = screen.getDisplayMatching(mainWindow.getBounds());
   const isApp = source.id.startsWith('window:');
   let appBounds = null;
+  let overlayBounds = null;
   
-  // Attempt to find the correct display if it's a screen recording
+  // 1. Determine target display and initial bounds
   if (source.id.startsWith('screen:')) {
     const displays = screen.getAllDisplays();
     const sourceDisplayId = source.display_id;
     const found = displays.find(d => d.id.toString() === sourceDisplayId);
-    if (found) targetDisplay = found;
+    if (found) {
+      targetDisplay = found;
+      overlayBounds = targetDisplay.bounds;
+    } else {
+      overlayBounds = targetDisplay.bounds;
+    }
   } else if (isApp) {
-    // Locate the specific screen of the selected app
     try {
       if (process.platform === 'win32') {
         const hwndStr = source.id.split(':')[1];
-        const isHex = hwndStr.toLowerCase().startsWith('0x');
-        const psCommand = `try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class W32 { [DllImport(\\"user32.dll\\")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; } }" } catch {} ; $hwnd = ${isHex ? `[convert]::ToInt32('${hwndStr}', 16)` : hwndStr} ; $rect = New-Object W32+RECT ; [W32]::GetWindowRect([IntPtr]$hwnd, [ref]$rect) | Out-Null ; Write-Output "$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"`;
-        const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCommand], { encoding: 'utf8', timeout: 5000 }).trim();
-        const [l, t, r, b] = out.split(',').map(Number);
-        if (!isNaN(l) && !isNaN(r) && r > l && b > t) {
-          appBounds = { x: l, y: t, width: r - l, height: b - t };
-          targetDisplay = screen.getDisplayMatching(appBounds);
+        const hwndInt = hwndStr.toLowerCase().startsWith('0x') ? parseInt(hwndStr, 16) : parseInt(hwndStr, 10);
+        
+        const psScript = `
+          Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32 { [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect); [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; } }';
+          $hwnd = [IntPtr]${hwndInt};
+          $rect = New-Object W32+RECT;
+          $hr = [W32]::DwmGetWindowAttribute($hwnd, 9, [ref]$rect, 16);
+          if ($hr -ne 0) { [W32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null };
+          Write-Output "$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)";
+        `;
+        
+        const res = runPowerShell(psScript);
+        if (res.success) {
+          const [l, t, r, b] = res.output.split(',').map(Number);
+          if (!isNaN(l) && !isNaN(r) && r > l && b > t) {
+            const physCenter = { x: l + (r - l) / 2, y: t + (b - t) / 2 };
+            const displays = screen.getAllDisplays();
+            targetDisplay = displays.find(d => {
+              const pX = d.bounds.x * d.scaleFactor;
+              const pY = d.bounds.y * d.scaleFactor;
+              const pW = d.bounds.width * d.scaleFactor;
+              const pH = d.bounds.height * d.scaleFactor;
+              return physCenter.x >= pX && physCenter.x < pX + pW && physCenter.y >= pY && physCenter.y < pY + pH;
+            }) || screen.getPrimaryDisplay();
+            
+            const sf = targetDisplay.scaleFactor;
+            const logicalX = targetDisplay.bounds.x + (l - (targetDisplay.bounds.x * sf)) / sf;
+            const logicalY = targetDisplay.bounds.y + (t - (targetDisplay.bounds.y * sf)) / sf;
+            const logicalWidth = (r - l) / sf;
+            const logicalHeight = (b - t) / sf;
+            appBounds = { x: Math.round(logicalX), y: Math.round(logicalY), width: Math.round(logicalWidth), height: Math.round(logicalHeight) };
+            overlayBounds = appBounds;
+          }
         }
       } else if (process.platform === 'darwin') {
         const parts = source.name.split(/\s+-\s+|\s+—\s+|\s+\|\s+/);
@@ -203,15 +272,18 @@ ipcMain.on('recording-started', (event, source) => {
         if (!isNaN(l) && !isNaN(r) && r > l && b > t) {
           appBounds = { x: l, y: t, width: r - l, height: b - t };
           targetDisplay = screen.getDisplayMatching(appBounds);
+          overlayBounds = appBounds;
         }
       }
     } catch (e) {
-      console.log('Failed to fetch app window bounds, using fallback display:', e.message);
+      console.log('Failed to fetch initial app bounds:', e.message);
     }
   }
 
-  const overlayBounds = isApp && appBounds ? appBounds : targetDisplay.bounds;
+  // Fallback if bounds fetch failed
+  if (!overlayBounds) overlayBounds = targetDisplay.bounds;
 
+  // 2. Create overlay and toolbar windows
   overlayWindow = new BrowserWindow({
     x: overlayBounds.x,
     y: overlayBounds.y,
@@ -234,7 +306,7 @@ ipcMain.on('recording-started', (event, source) => {
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   overlayWindow.loadFile('src/renderer/overlay.html');
 
-  const { x: dx, y: dy, width: dWidth, height: dHeight } = targetDisplay.bounds;
+  const { x: dx, y: dy, width: dWidth, height: dHeight } = targetDisplay.workArea;
 
   toolbarWindow = new BrowserWindow({
     parent: overlayWindow || null,
@@ -261,29 +333,78 @@ ipcMain.on('recording-started', (event, source) => {
     toolbarWindow.webContents.send('drawing-available', isDrawingAvailable, isApp);
   });
 
-  // Poll to track app window bounds if it is moved or resized
+  // 3. Set up boundary tracking for apps
   let boundsTrackerProcess = null;
   if (isApp && appBounds) {
     if (process.platform === 'win32') {
       const hwndStr = source.id.split(':')[1];
-      const isHex = hwndStr.toLowerCase().startsWith('0x');
-      const psScript = `try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class W32 { [DllImport(\\"user32.dll\\")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; } }" } catch {} ; $hwnd = ${isHex ? `[convert]::ToInt32('${hwndStr}', 16)` : hwndStr} ; $rect = New-Object W32+RECT ; while ($true) { [W32]::GetWindowRect([IntPtr]$hwnd, [ref]$rect) | Out-Null ; [Console]::WriteLine("$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)") ; Start-Sleep -Milliseconds 500 }`;
-      boundsTrackerProcess = require('child_process').spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript]);
+      const hwndInt = hwndStr.toLowerCase().startsWith('0x') ? parseInt(hwndStr, 16) : parseInt(hwndStr, 10);
+      const psScript = `
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32 { [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect); [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute); [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindow(IntPtr hWnd); [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsIconic(IntPtr hWnd); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; } }';
+        $hwnd = [IntPtr]${hwndInt};
+        $rect = New-Object W32+RECT;
+        while ($true) {
+          if (-not [W32]::IsWindow($hwnd)) { Write-Output "CLOSED"; break };
+          if ([W32]::IsIconic($hwnd)) { 
+            Write-Output "MINIMIZED";
+            Start-Sleep -Milliseconds 500;
+            continue;
+          };
+          $hr = [W32]::DwmGetWindowAttribute($hwnd, 9, [ref]$rect, 16);
+          if ($hr -ne 0) { [W32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null };
+          [Console]::WriteLine("$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)");
+          Start-Sleep -Milliseconds 150;
+        }
+      `;
+      
+      boundsTrackerProcess = spawnPowerShell(psScript);
       boundsTrackerProcess.stdout.on('data', (data) => {
+        if (!boundsTrackerProcess) return;
         if (!overlayWindow || overlayWindow.isDestroyed()) return boundsTrackerProcess.kill();
         const lines = data.toString().trim().split(/\r?\n/);
         const lastLine = lines[lines.length - 1].trim();
         if (!lastLine) return;
+        
+        if (lastLine === "CLOSED") {
+           if (mainWindow) mainWindow.webContents.send('stop-recording');
+           return boundsTrackerProcess?.kill();
+        }
+        
+        if (lastLine === "MINIMIZED") {
+           if (overlayWindow && overlayWindow.isVisible()) overlayWindow.hide();
+           return;
+        }
+
         const [l, t, r, b] = lastLine.split(',').map(Number);
+        
         if (!isNaN(l) && !isNaN(r) && r > l && b > t) {
-          const newBounds = { x: l, y: t, width: r - l, height: b - t };
+          if (overlayWindow && !overlayWindow.isVisible()) overlayWindow.show();
+          
+          const physCenter = { x: l + (r - l) / 2, y: t + (b - t) / 2 };
+          const displays = screen.getAllDisplays();
+          const currentDisp = displays.find(d => {
+            const pX = d.bounds.x * d.scaleFactor;
+            const pY = d.bounds.y * d.scaleFactor;
+            const pW = d.bounds.width * d.scaleFactor;
+            const pH = d.bounds.height * d.scaleFactor;
+            return physCenter.x >= pX && physCenter.x < pX + pW && physCenter.y >= pY && physCenter.y < pY + pH;
+          }) || targetDisplay;
+          
+          const sf = currentDisp.scaleFactor;
+          const logicalX = Math.round(currentDisp.bounds.x + (l - (currentDisp.bounds.x * sf)) / sf);
+          const logicalY = Math.round(currentDisp.bounds.y + (t - (currentDisp.bounds.y * sf)) / sf);
+          const logicalWidth = Math.round((r - l) / sf);
+          const logicalHeight = Math.round((b - t) / sf);
+          
+          const newBounds = { x: logicalX, y: logicalY, width: logicalWidth, height: logicalHeight };
+          
           if (newBounds.x !== appBounds.x || newBounds.y !== appBounds.y || newBounds.width !== appBounds.width || newBounds.height !== appBounds.height) {
             appBounds = newBounds;
             overlayWindow.setBounds(appBounds);
-            const newDisplay = screen.getDisplayMatching(appBounds);
-            if (newDisplay.id !== targetDisplay.id) {
-              targetDisplay = newDisplay;
-              const { x: ddx, y: ddy, width: ddWidth, height: ddHeight } = targetDisplay.bounds;
+            
+            if (currentDisp.id !== targetDisplay.id) {
+              targetDisplay = currentDisp;
+              const { x: ddx, y: ddy, width: ddWidth, height: ddHeight } = targetDisplay.workArea;
               if (toolbarWindow && !toolbarWindow.isDestroyed()) {
                 toolbarWindow.setBounds({ x: ddx + Math.floor((ddWidth - 450) / 2), y: ddy + ddHeight - 80, width: 450, height: 60 });
               }
@@ -294,13 +415,24 @@ ipcMain.on('recording-started', (event, source) => {
     } else if (process.platform === 'darwin') {
       const parts = source.name.split(/\s+-\s+|\s+—\s+|\s+\|\s+/);
       const appName = parts.length > 1 ? parts.pop().trim() : source.name.trim();
-      const osaScript = `repeat\ntry\ntell application "System Events"\nset b to bounds of window 1 of process "${appName}"\nlog (item 1 of b as string) & "," & (item 2 of b as string) & "," & (item 3 of b as string) & "," & (item 4 of b as string)\nend tell\nend try\ndelay 0.5\nend repeat`;
+      const osaScript = `repeat\ntry\ntell application "System Events"\nset p to process "${appName}"\nif not (exists p) then\nlog "CLOSED"\nexit repeat\nend if\nset b to bounds of window 1 of p\nlog (item 1 of b as string) & "," & (item 2 of b as string) & "," & (item 3 of b as string) & "," & (item 4 of b as string)\nend tell\non error\nlog "CLOSED"\nexit repeat\nend try\ndelay 0.2\nend repeat`;
       boundsTrackerProcess = require('child_process').spawn('osascript', ['-e', osaScript]);
-      boundsTrackerProcess.stderr.on('data', (data) => {
+      boundsTrackerProcess.stdout.on('data', (data) => {
+        if (!boundsTrackerProcess) return;
         if (!overlayWindow || overlayWindow.isDestroyed()) return boundsTrackerProcess.kill();
         const lines = data.toString().trim().split(/\r?\n/);
         const lastLine = lines[lines.length - 1].trim();
-        if (!lastLine) return;
+        if (lastLine === "CLOSED") {
+           if (mainWindow) mainWindow.webContents.send('stop-recording');
+           return boundsTrackerProcess?.kill();
+        }
+      });
+      boundsTrackerProcess.stderr.on('data', (data) => {
+        if (!boundsTrackerProcess) return;
+        if (!overlayWindow || overlayWindow.isDestroyed()) return boundsTrackerProcess.kill();
+        const lines = data.toString().trim().split(/\r?\n/);
+        const lastLine = lines[lines.length - 1].trim();
+        if (!lastLine || lastLine === "CLOSED") return;
         const [l, t, r, b] = lastLine.split(',').map(n => parseInt(n.trim(), 10));
         if (!isNaN(l) && !isNaN(r) && r > l && b > t) {
           const newBounds = { x: l, y: t, width: r - l, height: b - t };
@@ -310,7 +442,7 @@ ipcMain.on('recording-started', (event, source) => {
             const newDisplay = screen.getDisplayMatching(appBounds);
             if (newDisplay.id !== targetDisplay.id) {
               targetDisplay = newDisplay;
-              const { x: ddx, y: ddy, width: ddWidth, height: ddHeight } = targetDisplay.bounds;
+              const { x: ddx, y: ddy, width: ddWidth, height: ddHeight } = targetDisplay.workArea;
               if (toolbarWindow && !toolbarWindow.isDestroyed()) {
                 toolbarWindow.setBounds({ x: ddx + Math.floor((ddWidth - 450) / 2), y: ddy + ddHeight - 80, width: 450, height: 60 });
               }
@@ -330,22 +462,18 @@ ipcMain.on('recording-started', (event, source) => {
     }
   }
 
-  // Bring the selected application to the front of the screen
-  if (isApp) {
-    if (process.platform === 'win32') {
-      const hwndStr = source.id.split(':')[1];
-      const isHex = hwndStr.toLowerCase().startsWith('0x');
-      const psCommand = `try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class Win32 { [DllImport(\\"user32.dll\\")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd); }" } catch {} ; $hwnd = ${isHex ? `[convert]::ToInt32('${hwndStr}', 16)` : hwndStr} ; [Win32]::SetForegroundWindow([IntPtr]$hwnd)`;
-      execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCommand], (err) => {
-        if (err) console.error('Failed to focus window:', err);
-      });
-    } else if (process.platform === 'darwin') {
-      const parts = source.name.split(/\s+-\s+|\s+—\s+|\s+\|\s+/);
-      const appName = parts.length > 1 ? parts.pop().trim() : source.name.trim();
-      execFile('osascript', ['-e', `tell application "${appName}" to activate`], (err) => {
-         if (err) console.error('Failed to focus window:', err);
-      });
-    }
+  // 4. Focus the selected app
+  if (isApp && process.platform === 'win32') {
+    const hwndStr = source.id.split(':')[1];
+    const hwndInt = hwndStr.toLowerCase().startsWith('0x') ? parseInt(hwndStr, 16) : parseInt(hwndStr, 10);
+    runPowerShell(`
+      Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32 { [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd); }';
+      [Win32]::SetForegroundWindow([IntPtr]${hwndInt});
+    `);
+  } else if (isApp && process.platform === 'darwin') {
+    const parts = source.name.split(/\s+-\s+|\s+—\s+|\s+\|\s+/);
+    const appName = parts.length > 1 ? parts.pop().trim() : source.name.trim();
+    execFile('osascript', ['-e', `tell application "${appName}" to activate`], (err) => {});
   }
 });
 
